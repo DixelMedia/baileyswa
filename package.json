@@ -1,0 +1,13 @@
+{
+  "name": "baileyswa",
+  "version": "1.0.0",
+  "main": "index.js",
+  "author": "DixelMedia <167999581+DixelMedia@users.noreply.github.com>",
+  "license": "MIT",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.18",
+    "baileys": "^6.7.18",
+    "express": "^5.1.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
