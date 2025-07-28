@@ -100,8 +100,8 @@ app.post('/send', async (req, res) => {
   }
 });
 
-app.listen(3000, () => {
-  console.log('📡 API escuchando en http://localhost:3000/send');
+app.listen(3100, () => {
+  console.log('📡 API escuchando en http://localhost:3100/send');
 });
 
 startBot();
