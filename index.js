@@ -8,7 +8,7 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const app = express();
 
-let sock; // 👈 Definimos sock como variable global
+let sock;
 
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState('./auth_info_baileys');
@@ -39,26 +39,46 @@ async function startBot() {
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
 
-    const msg = messages[0];    
+    const msg = messages[0];
     if (!msg.message || msg.key.fromMe) return;
 
     const sender = msg.key.remoteJid;
-    const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
+    const participant = msg.key.participant || sender;
+    const messageType = Object.keys(msg.message)[0];
+    const text =
+      msg.message?.conversation ||
+      msg.message?.extendedTextMessage?.text ||
+      msg.message?.[messageType]?.text ||
+      '';
 
-    console.log(`📩 Mensaje recibido de ${sender}: ${text}`);
+    const isGroup = sender.endsWith('@g.us');
+    const mentionedJids = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
 
-    // Enviar a n8n
+    const botId = sock.user.id.split(':')[0]; // ID sin instancia
+    const isMentioned = mentionedJids.some((jid) => jid.includes(botId));
+
+    if (!isGroup || !isMentioned) return;
+
+    console.log(`📩 Mención recibida en grupo ${sender} de ${participant}: ${text}`);
+
     try {
-      await axios.post('https://ai.dixelmedia.com/webhook/wa-in', {
-        number: sender,
-        message: text
+      // Responder en el grupo
+      await sock.sendMessage(sender, {
+        text: '🤖 El asistente está procesando tu solicitud. Te responderá en breve.',
+        quoted: msg,
       });
+
+      // Enviar a n8n
+      await axios.post('https://ai.dixelmedia.com/webhook/wa-in', {
+        group_id: sender,
+        participant: participant,
+        message: text,
+      });
+
       console.log('✅ Mensaje enviado a n8n');
     } catch (error) {
-      console.error('❌ Error al enviar a n8n:', error.message);
+      console.error('❌ Error al procesar mención:', error.message);
     }
-
-    await sock.sendMessage(sender, { text: '✅ Tu mensaje fue recibido y está siendo procesado.' });
   });
 }
 
@@ -80,8 +100,8 @@ app.post('/send', async (req, res) => {
   }
 });
 
-app.listen(3100, () => {
-  console.log('📡 API escuchando en http://localhost:3100/send');
+app.listen(3000, () => {
+  console.log('📡 API escuchando en http://localhost:3000/send');
 });
 
-startBot(); // 👈 inicia el bot
+startBot();
