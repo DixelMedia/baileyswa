@@ -7,6 +7,12 @@ const axios = require('axios');
 const express = require('express');
 const bodyParser = require('body-parser');
 const app = express();
+const PORT = process.env.PORT || 3100;
+
+// Fuerza IPv4
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`📡 API escuchando en http://0.0.0.0:${PORT}/send`);
+});
 
 let sock;
 
@@ -100,8 +106,10 @@ app.post('/send', async (req, res) => {
   }
 });
 
-app.listen(3100, () => {
-  console.log('📡 API escuchando en http://localhost:3100/send');
+// Fuerza IPv4
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`📡 API escuchando en http://0.0.0.0:${PORT}/send`);
 });
+
 
 startBot();
