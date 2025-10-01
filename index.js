@@ -31,21 +31,23 @@ const getText = (m) =>
   '';
 
 /**
- * Extrae todos los mentionedJid posibles
+ * Recolecta TODAS las menciones (mentionedJid) recorriendo cualquier contextInfo anidado.
  */
-const getMentionedJids = (msg) => {
-  const m = msg.message || {};
-  const tryCtx = (x) => x?.contextInfo?.mentionedJid || [];
-  return [
-    ...(tryCtx(m.extendedTextMessage)),
-    ...(tryCtx(m.imageMessage)),
-    ...(tryCtx(m.videoMessage)),
-    ...(tryCtx(m.buttonsMessage)),
-    ...(tryCtx(m.buttonsResponseMessage)),
-    ...(tryCtx(m.listMessage)),
-    ...(tryCtx(m.listResponseMessage)),
-    ...(tryCtx(m.interactiveResponseMessage)),
-  ].filter(Boolean);
+const collectMentionedJidsDeep = (obj, acc = []) => {
+  if (!obj || typeof obj !== 'object') return acc;
+  if (obj.contextInfo && Array.isArray(obj.contextInfo.mentionedJid)) {
+    acc.push(...obj.contextInfo.mentionedJid);
+  }
+  // algunos mensajes anidan el mensaje original en quotedMessage / message
+  if (obj.contextInfo && obj.contextInfo.quotedMessage) {
+    collectMentionedJidsDeep(obj.contextInfo.quotedMessage, acc);
+  }
+  // recorrer todas las propiedades por si hay submensajes (imageMessage, videoMessage, etc.)
+  for (const k of Object.keys(obj)) {
+    const v = obj[k];
+    if (v && typeof v === 'object') collectMentionedJidsDeep(v, acc);
+  }
+  return acc;
 };
 
 const toJid = (raw) => {
@@ -89,82 +91,55 @@ async function startBot() {
     }
   });
 
-sock.ev.on('messages.upsert', async ({ messages, type }) => {
-  // LOG CRUDO: ver TODO lo que llega, sin filtros
-  for (const m of messages) {
-    const jid = m.key?.remoteJid;
-    const msgType = Object.keys(m.message || {})[0] || 'unknown';
-    console.log('[UPSERT:RAW]', { type, jid, msgType, fromMe: !!m.key?.fromMe });
-  }
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    // Log crudo para ver TODO lo que llega
+    for (const m of messages) {
+      const jid = m.key?.remoteJid;
+      const msgType = Object.keys(m.message || {})[0] || 'unknown';
+      console.log('[UPSERT:RAW]', { type, jid, msgType, fromMe: !!m.key?.fromMe });
+    }
 
-  // Acepta 'notify' y 'append' mientras diagnosticamos
-  if (!['notify', 'append'].includes(type)) return;
+    // Acepta notify y append
+    if (!['notify', 'append'].includes(type)) return;
 
-  for (const msg of messages) {
-    if (!msg.message || msg.key.fromMe) continue;
+    for (const msg of messages) {
+      if (!msg.message || msg.key.fromMe) continue;
 
-    const chatJid = msg.key.remoteJid;
-    const isGroup = chatJid.endsWith('@g.us');
+      const chatJid = msg.key.remoteJid;
+      const isGroup = chatJid.endsWith('@g.us');
+      if (!isGroup) continue; // SOLO grupos
 
-    // --- TEST: PING -> PONG (DM o grupo, sin exigir mención), solo para prueba ---
-    const txt =
-      msg.message?.conversation ??
-      msg.message?.extendedTextMessage?.text ??
-      msg.message?.imageMessage?.caption ??
-      msg.message?.videoMessage?.caption ?? '';
-    if ((txt || '').trim().toUpperCase() === 'PING') {
+      // Detectar mención REAL (en profundidad)
+      const mentioned = collectMentionedJidsDeep(msg.message);
+      const me = sock?.user?.id;
+      const iAmMentioned = Array.isArray(mentioned) && mentioned.some((j) => areJidsSameUser(j, me));
+
+      console.log('[MENTIONS]', { me, mentioned, iAmMentioned });
+
+      if (!iAmMentioned) continue; // SOLO si me mencionan
+
+      const text = (getText(msg) || '').trim();
+      console.log(`📩 Mención en ${chatJid} → ${text}`);
+
       try {
         await sock.assertSessions([chatJid], false);
-        await sock.sendMessage(chatJid, { text: 'PONG' });
-        console.log('[TEST] PONG ->', chatJid);
-      } catch (e) {
-        console.error('[TEST] PONG error', e?.message || e);
+        await sock.sendMessage(chatJid, {
+          text: '🤖 Procesando tu solicitud…',
+          quoted: msg,
+        });
+
+        await axios.post('https://ai.dixelmedia.com/webhook/wa-in', {
+          group_id: chatJid,
+          participant: msg.key.participant || chatJid,
+          message: text,
+        });
+
+        console.log('✅ Enviado a n8n');
+      } catch (err) {
+        console.error('❌ Error en manejo de mención:', err?.message || err);
       }
     }
-
-    // --- Aquí tu lógica "solo si me mencionan" en GRUPO ---
-    if (!isGroup) continue;
-
-    const me = sock?.user?.id;
-    const m = msg.message || {};
-    const ctx = (x) => x?.contextInfo?.mentionedJid || [];
-    const mentioned = [
-      ...ctx(m.extendedTextMessage),
-      ...ctx(m.imageMessage),
-      ...ctx(m.videoMessage),
-      ...ctx(m.buttonsMessage),
-      ...ctx(m.buttonsResponseMessage),
-      ...ctx(m.listMessage),
-      ...ctx(m.listResponseMessage),
-      ...ctx(m.interactiveResponseMessage),
-    ].filter(Boolean);
-
-    const iAmMentioned = Array.isArray(mentioned) && mentioned.some(j => areJidsSameUser(j, me));
-    if (!iAmMentioned) continue;
-
-    const text =
-      m.conversation ??
-      m.extendedTextMessage?.text ??
-      m.imageMessage?.caption ??
-      m.videoMessage?.caption ?? '';
-
-    console.log(`📩 Mención en ${chatJid} → ${text}`);
-
-    try {
-      await sock.assertSessions([chatJid], false);
-      await sock.sendMessage(chatJid, { text: '🤖 Procesando tu solicitud…', quoted: msg });
-      await axios.post('https://ai.dixelmedia.com/webhook/wa-in', {
-        group_id: chatJid,
-        participant: msg.key.participant || chatJid,
-        message: text,
-      });
-      console.log('✅ Enviado a n8n');
-    } catch (err) {
-      console.error('❌ Error en manejo de mención:', err?.message || err);
-    }
-  }
-});
-
+  });
 }
 
 // endpoint para enviar mensajes manualmente
