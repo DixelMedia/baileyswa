@@ -89,49 +89,82 @@ async function startBot() {
     }
   });
 
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
+sock.ev.on('messages.upsert', async ({ messages, type }) => {
+  // LOG CRUDO: ver TODO lo que llega, sin filtros
+  for (const m of messages) {
+    const jid = m.key?.remoteJid;
+    const msgType = Object.keys(m.message || {})[0] || 'unknown';
+    console.log('[UPSERT:RAW]', { type, jid, msgType, fromMe: !!m.key?.fromMe });
+  }
 
-    for (const msg of messages) {
-      if (!msg.message || msg.key.fromMe) continue;
+  // Acepta 'notify' y 'append' mientras diagnosticamos
+  if (!['notify', 'append'].includes(type)) return;
 
-      const chatJid = msg.key.remoteJid;
-      const isGroup = chatJid.endsWith('@g.us');
-      if (!isGroup) continue; // solo grupos
+  for (const msg of messages) {
+    if (!msg.message || msg.key.fromMe) continue;
 
-      const text = (getText(msg) || '').trim();
-      const mentioned = getMentionedJids(msg);
-      const me = sock?.user?.id;
+    const chatJid = msg.key.remoteJid;
+    const isGroup = chatJid.endsWith('@g.us');
 
-      const iAmMentioned =
-        Array.isArray(mentioned) && mentioned.some((j) => areJidsSameUser(j, me));
-
-      // Si no me mencionaron, no hago nada
-      if (!iAmMentioned) continue;
-
-      console.log(`📩 Mención en ${chatJid} → ${text}`);
-
+    // --- TEST: PING -> PONG (DM o grupo, sin exigir mención), solo para prueba ---
+    const txt =
+      msg.message?.conversation ??
+      msg.message?.extendedTextMessage?.text ??
+      msg.message?.imageMessage?.caption ??
+      msg.message?.videoMessage?.caption ?? '';
+    if ((txt || '').trim().toUpperCase() === 'PING') {
       try {
-        // Respuesta inmediata al grupo
         await sock.assertSessions([chatJid], false);
-        await sock.sendMessage(chatJid, {
-          text: '🤖 Procesando tu solicitud…',
-          quoted: msg,
-        });
-
-        // Notificar a n8n
-        await axios.post('https://ai.dixelmedia.com/webhook/wa-in', {
-          group_id: chatJid,
-          participant: msg.key.participant || chatJid,
-          message: text,
-        });
-
-        console.log('✅ Enviado a n8n');
-      } catch (err) {
-        console.error('❌ Error en manejo de mención:', err?.message || err);
+        await sock.sendMessage(chatJid, { text: 'PONG' });
+        console.log('[TEST] PONG ->', chatJid);
+      } catch (e) {
+        console.error('[TEST] PONG error', e?.message || e);
       }
     }
-  });
+
+    // --- Aquí tu lógica "solo si me mencionan" en GRUPO ---
+    if (!isGroup) continue;
+
+    const me = sock?.user?.id;
+    const m = msg.message || {};
+    const ctx = (x) => x?.contextInfo?.mentionedJid || [];
+    const mentioned = [
+      ...ctx(m.extendedTextMessage),
+      ...ctx(m.imageMessage),
+      ...ctx(m.videoMessage),
+      ...ctx(m.buttonsMessage),
+      ...ctx(m.buttonsResponseMessage),
+      ...ctx(m.listMessage),
+      ...ctx(m.listResponseMessage),
+      ...ctx(m.interactiveResponseMessage),
+    ].filter(Boolean);
+
+    const iAmMentioned = Array.isArray(mentioned) && mentioned.some(j => areJidsSameUser(j, me));
+    if (!iAmMentioned) continue;
+
+    const text =
+      m.conversation ??
+      m.extendedTextMessage?.text ??
+      m.imageMessage?.caption ??
+      m.videoMessage?.caption ?? '';
+
+    console.log(`📩 Mención en ${chatJid} → ${text}`);
+
+    try {
+      await sock.assertSessions([chatJid], false);
+      await sock.sendMessage(chatJid, { text: '🤖 Procesando tu solicitud…', quoted: msg });
+      await axios.post('https://ai.dixelmedia.com/webhook/wa-in', {
+        group_id: chatJid,
+        participant: msg.key.participant || chatJid,
+        message: text,
+      });
+      console.log('✅ Enviado a n8n');
+    } catch (err) {
+      console.error('❌ Error en manejo de mención:', err?.message || err);
+    }
+  }
+});
+
 }
 
 // endpoint para enviar mensajes manualmente
