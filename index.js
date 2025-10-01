@@ -1,115 +1,136 @@
-const makeWASocket = require('@whiskeysockets/baileys').default;
-const { useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, makeCacheableSignalKeyStore, areJidsSameUser } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const P = require('pino');
 const qrcode = require('qrcode-terminal');
 const axios = require('axios');
 const express = require('express');
 const bodyParser = require('body-parser');
+
 const app = express();
 const PORT = process.env.PORT || 3100;
 
-// Fuerza IPv4
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`📡 API escuchando en http://0.0.0.0:${PORT}/send`);
-});
+app.use(bodyParser.json());
 
 let sock;
+let starting = false;
+
+const getText = (m) =>
+  m.message?.conversation ??
+  m.message?.extendedTextMessage?.text ??
+  m.message?.imageMessage?.caption ??
+  m.message?.videoMessage?.caption ??
+  m.message?.buttonsResponseMessage?.selectedDisplayText ??
+  m.message?.listResponseMessage?.singleSelectReply?.selectedRowId ??
+  m.message?.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson ??
+  '';
+
+const bare = (jid) => (jid || '').split('@')[0];
+const toJid = (raw) => {
+  if (!raw) return raw;
+  return raw.includes('@') ? raw : `${raw.replace(/\D/g, '')}@s.whatsapp.net`;
+};
 
 async function startBot() {
+  if (starting) return;
+  starting = true;
+
+  const logger = P({ level: 'info' });
   const { state, saveCreds } = await useMultiFileAuthState('./auth_info_baileys');
 
   sock = makeWASocket({
-    auth: state,
-    logger: P({ level: 'info' }),
+    logger,
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, logger),
+    },
+    printQRInTerminal: true,
   });
 
   sock.ev.on('creds.update', saveCreds);
 
-  sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
+  sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
     if (qr) {
-      console.log('🧾 Escanea el QR para conectar tu bot:');
+      console.log('🧾 Escanea el QR:');
       qrcode.generate(qr, { small: true });
     }
 
     if (connection === 'close') {
-      const shouldReconnect =
-        new Boom(lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-      console.log('🔌 Conexión cerrada. Reintentando:', shouldReconnect);
-      if (shouldReconnect) startBot();
+      const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
+      const shouldReconnect = reason !== DisconnectReason.loggedOut;
+      console.log('🔌 Conexión cerrada. Reintentar:', shouldReconnect, 'razón:', reason);
+      starting = false;
+      if (shouldReconnect) setTimeout(startBot, 1500);
     } else if (connection === 'open') {
-      console.log('✅ Bot conectado correctamente a WhatsApp');
+      console.log('✅ Bot conectado');
+      starting = false;
     }
   });
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
 
-    const msg = messages[0];
-    if (!msg.message || msg.key.fromMe) return;
+    for (const msg of messages) {
+      if (!msg.message || msg.key.fromMe) continue;
 
-    const sender = msg.key.remoteJid;
-    const participant = msg.key.participant || sender;
-    const messageType = Object.keys(msg.message)[0];
-    const text =
-      msg.message?.conversation ||
-      msg.message?.extendedTextMessage?.text ||
-      msg.message?.[messageType]?.text ||
-      '';
+      const chatJid = msg.key.remoteJid;
+      const isGroup = chatJid.endsWith('@g.us');
+      if (!isGroup) continue;
 
-    const isGroup = sender.endsWith('@g.us');
-    const mentionedJids = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+      const text = (getText(msg) || '').trim();
+      const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+      const me = sock?.user?.id; // p.ej. 57300xxxxx:1@s.whatsapp.net
 
-    const botId = sock.user.id.split(':')[0]; // ID sin instancia
-    const isMentioned = mentionedJids.some((jid) => jid.includes(botId));
+      const iAmMentioned = Array.isArray(mentioned) && mentioned.some(j => areJidsSameUser(j, me));
 
-    if (!isGroup || !isMentioned) return;
+      if (!iAmMentioned) continue;
 
-    console.log(`📩 Mención recibida en grupo ${sender} de ${participant}: ${text}`);
+      console.log(`📩 Mención en ${chatJid} → ${text}`);
 
-    try {
-      // Responder en el grupo
-      await sock.sendMessage(sender, {
-        text: '🤖 El asistente está procesando tu solicitud. Te responderá en breve.',
-        quoted: msg,
-      });
+      try {
+        // Respuesta inmediata al grupo
+        await sock.assertSessions([chatJid], false);
+        await sock.sendMessage(chatJid, {
+          text: '🤖 Procesando tu solicitud…',
+          quoted: msg,
+        });
 
-      // Enviar a n8n
-      await axios.post('https://ai.dixelmedia.com/webhook/wa-in', {
-        group_id: sender,
-        participant: participant,
-        message: text,
-      });
+        // Notificar a n8n
+        await axios.post('https://ai.dixelmedia.com/webhook/wa-in', {
+          group_id: chatJid,
+          participant: msg.key.participant || chatJid,
+          message: text,
+        });
 
-      console.log('✅ Mensaje enviado a n8n');
-    } catch (error) {
-      console.error('❌ Error al procesar mención:', error.message);
+        console.log('✅ Enviado a n8n');
+      } catch (err) {
+        console.error('❌ Error en manejo de mención:', err?.message || err);
+      }
     }
   });
 }
 
-app.use(bodyParser.json());
-
+// endpoint para enviar mensajes
 app.post('/send', async (req, res) => {
-  const { to, message } = req.body;
-
-  if (!sock) {
-    return res.status(503).send({ success: false, error: 'WhatsApp socket no está listo aún.' });
-  }
-
   try {
+    if (!sock) return res.status(503).json({ success: false, error: 'Socket no listo' });
+
+    const to = toJid(req.body.to);
+    const message = req.body.message || '';
+    if (!to || !message) return res.status(400).json({ success: false, error: 'Faltan campos (to, message)' });
+
+    await sock.assertSessions([to], false);
     await sock.sendMessage(to, { text: message });
-    res.status(200).send({ success: true });
+
+    res.json({ success: true });
   } catch (err) {
-    console.error('❌ Error al enviar desde /send:', err);
-    res.status(500).send({ success: false, error: err.message });
+    console.error('❌ /send error:', err?.message || err);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// Fuerza IPv4
+// **un solo** listen
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`📡 API escuchando en http://0.0.0.0:${PORT}/send`);
 });
-
 
 startBot();
