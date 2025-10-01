@@ -1,4 +1,10 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, makeCacheableSignalKeyStore, areJidsSameUser } = require('@whiskeysockets/baileys');
+const {
+  default: makeWASocket,
+  useMultiFileAuthState,
+  DisconnectReason,
+  makeCacheableSignalKeyStore,
+  areJidsSameUser
+} = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const P = require('pino');
 const qrcode = require('qrcode-terminal');
@@ -24,7 +30,24 @@ const getText = (m) =>
   m.message?.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson ??
   '';
 
-const bare = (jid) => (jid || '').split('@')[0];
+/**
+ * Extrae todos los mentionedJid posibles
+ */
+const getMentionedJids = (msg) => {
+  const m = msg.message || {};
+  const tryCtx = (x) => x?.contextInfo?.mentionedJid || [];
+  return [
+    ...(tryCtx(m.extendedTextMessage)),
+    ...(tryCtx(m.imageMessage)),
+    ...(tryCtx(m.videoMessage)),
+    ...(tryCtx(m.buttonsMessage)),
+    ...(tryCtx(m.buttonsResponseMessage)),
+    ...(tryCtx(m.listMessage)),
+    ...(tryCtx(m.listResponseMessage)),
+    ...(tryCtx(m.interactiveResponseMessage)),
+  ].filter(Boolean);
+};
+
 const toJid = (raw) => {
   if (!raw) return raw;
   return raw.includes('@') ? raw : `${raw.replace(/\D/g, '')}@s.whatsapp.net`;
@@ -74,14 +97,16 @@ async function startBot() {
 
       const chatJid = msg.key.remoteJid;
       const isGroup = chatJid.endsWith('@g.us');
-      if (!isGroup) continue;
+      if (!isGroup) continue; // solo grupos
 
       const text = (getText(msg) || '').trim();
-      const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
-      const me = sock?.user?.id; // p.ej. 57300xxxxx:1@s.whatsapp.net
+      const mentioned = getMentionedJids(msg);
+      const me = sock?.user?.id;
 
-      const iAmMentioned = Array.isArray(mentioned) && mentioned.some(j => areJidsSameUser(j, me));
+      const iAmMentioned =
+        Array.isArray(mentioned) && mentioned.some((j) => areJidsSameUser(j, me));
 
+      // Si no me mencionaron, no hago nada
       if (!iAmMentioned) continue;
 
       console.log(`📩 Mención en ${chatJid} → ${text}`);
@@ -109,14 +134,15 @@ async function startBot() {
   });
 }
 
-// endpoint para enviar mensajes
+// endpoint para enviar mensajes manualmente
 app.post('/send', async (req, res) => {
   try {
     if (!sock) return res.status(503).json({ success: false, error: 'Socket no listo' });
 
     const to = toJid(req.body.to);
     const message = req.body.message || '';
-    if (!to || !message) return res.status(400).json({ success: false, error: 'Faltan campos (to, message)' });
+    if (!to || !message)
+      return res.status(400).json({ success: false, error: 'Faltan campos (to, message)' });
 
     await sock.assertSessions([to], false);
     await sock.sendMessage(to, { text: message });
@@ -128,7 +154,7 @@ app.post('/send', async (req, res) => {
   }
 });
 
-// **un solo** listen
+// servidor API
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`📡 API escuchando en http://0.0.0.0:${PORT}/send`);
 });
