@@ -31,9 +31,7 @@ const getText = (m) =>
   m.message?.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson ??
   '';
 
-/**
- * Recolecta TODAS las menciones (mentionedJid) recorriendo cualquier contextInfo anidado.
- */
+/** Recolecta TODAS las menciones recorriendo cualquier contextInfo anidado. */
 const collectMentionedJidsDeep = (obj, acc = []) => {
   if (!obj || typeof obj !== 'object') return acc;
   if (obj.contextInfo && Array.isArray(obj.contextInfo.mentionedJid)) {
@@ -49,10 +47,7 @@ const collectMentionedJidsDeep = (obj, acc = []) => {
   return acc;
 };
 
-const toJid = (raw) => {
-  if (!raw) return raw;
-  return raw.includes('@') ? raw : `${raw.replace(/\D/g, '')}@s.whatsapp.net`;
-};
+const toJid = (raw) => (raw && raw.includes('@') ? raw : `${String(raw || '').replace(/\D/g, '')}@s.whatsapp.net`);
 
 async function startBot() {
   if (starting) return;
@@ -91,7 +86,7 @@ async function startBot() {
   });
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    // Log crudo (útil para depurar; puedes comentar estas 5 líneas si ya no lo necesitas)
+    // Log crudo (útil para depurar)
     for (const m of messages) {
       const jid = m.key?.remoteJid;
       const msgType = Object.keys(m.message || {})[0] || 'unknown';
@@ -108,14 +103,23 @@ async function startBot() {
       const isGroup = chatJid.endsWith('@g.us');
       if (!isGroup) continue; // SOLO grupos
 
-      // Detectar mención REAL (en profundidad) y NORMALIZAR JIDs (@lid -> @s.whatsapp.net, quitar :device, etc.)
-      const mentionedRaw = collectMentionedJidsDeep(msg.message);
-      const mentionedNorm = mentionedRaw.map((j) => jidNormalizedUser(j));
-      const meNorm = jidNormalizedUser(sock?.user?.id || '');
-      const iAmMentioned =
-        Array.isArray(mentionedNorm) && mentionedNorm.some((j) => areJidsSameUser(j, meNorm));
+      // ---- Identidades del bot (todas las formas posibles) ----
+      const meDevice = sock?.user?.id || '';                            // p.ej. "1302...:5@s.whatsapp.net"
+      const meUser   = jidNormalizedUser(meDevice);                      // p.ej. "1302...@s.whatsapp.net"
+      const meLid    = state?.creds?.me?.lid || state?.creds?.me?.lidJid || null; // p.ej. "68857...@lid" si está disponible
 
-      console.log('[MENTIONS]', { me: meNorm, mentioned: mentionedNorm, iAmMentioned });
+      const myJids = [meDevice, meUser, meLid]
+        .filter(Boolean)
+        .map((j) => jidNormalizedUser(j)); // normaliza todas
+
+      // ---- Menciones del mensaje (profundo) ----
+      const mentionedRaw  = collectMentionedJidsDeep(msg.message);
+      const mentionedNorm = mentionedRaw.map((j) => jidNormalizedUser(j));
+
+      // ¿Alguna mención coincide con cualquiera de mis identidades?
+      const iAmMentioned = mentionedNorm.some((j) => myJids.some((mine) => areJidsSameUser(j, mine)));
+
+      console.log('[MENTIONS]', { myJids, mentioned: mentionedNorm, iAmMentioned });
 
       if (!iAmMentioned) continue; // SOLO si me mencionan
 
@@ -124,10 +128,7 @@ async function startBot() {
 
       try {
         await sock.assertSessions([chatJid], false);
-        await sock.sendMessage(chatJid, {
-          text: '🤖 Procesando tu solicitud…',
-          quoted: msg,
-        });
+        await sock.sendMessage(chatJid, { text: '🤖 Procesando tu solicitud…', quoted: msg });
 
         await axios.post('https://ai.dixelmedia.com/webhook/wa-in', {
           group_id: chatJid,
