@@ -3,7 +3,8 @@ const {
   useMultiFileAuthState,
   DisconnectReason,
   makeCacheableSignalKeyStore,
-  areJidsSameUser
+  areJidsSameUser,
+  jidNormalizedUser
 } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const P = require('pino');
@@ -38,11 +39,9 @@ const collectMentionedJidsDeep = (obj, acc = []) => {
   if (obj.contextInfo && Array.isArray(obj.contextInfo.mentionedJid)) {
     acc.push(...obj.contextInfo.mentionedJid);
   }
-  // algunos mensajes anidan el mensaje original en quotedMessage / message
   if (obj.contextInfo && obj.contextInfo.quotedMessage) {
     collectMentionedJidsDeep(obj.contextInfo.quotedMessage, acc);
   }
-  // recorrer todas las propiedades por si hay submensajes (imageMessage, videoMessage, etc.)
   for (const k of Object.keys(obj)) {
     const v = obj[k];
     if (v && typeof v === 'object') collectMentionedJidsDeep(v, acc);
@@ -92,7 +91,7 @@ async function startBot() {
   });
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    // Log crudo para ver TODO lo que llega
+    // Log crudo (útil para depurar; puedes comentar estas 5 líneas si ya no lo necesitas)
     for (const m of messages) {
       const jid = m.key?.remoteJid;
       const msgType = Object.keys(m.message || {})[0] || 'unknown';
@@ -109,12 +108,14 @@ async function startBot() {
       const isGroup = chatJid.endsWith('@g.us');
       if (!isGroup) continue; // SOLO grupos
 
-      // Detectar mención REAL (en profundidad)
-      const mentioned = collectMentionedJidsDeep(msg.message);
-      const me = sock?.user?.id;
-      const iAmMentioned = Array.isArray(mentioned) && mentioned.some((j) => areJidsSameUser(j, me));
+      // Detectar mención REAL (en profundidad) y NORMALIZAR JIDs (@lid -> @s.whatsapp.net, quitar :device, etc.)
+      const mentionedRaw = collectMentionedJidsDeep(msg.message);
+      const mentionedNorm = mentionedRaw.map((j) => jidNormalizedUser(j));
+      const meNorm = jidNormalizedUser(sock?.user?.id || '');
+      const iAmMentioned =
+        Array.isArray(mentionedNorm) && mentionedNorm.some((j) => areJidsSameUser(j, meNorm));
 
-      console.log('[MENTIONS]', { me, mentioned, iAmMentioned });
+      console.log('[MENTIONS]', { me: meNorm, mentioned: mentionedNorm, iAmMentioned });
 
       if (!iAmMentioned) continue; // SOLO si me mencionan
 
